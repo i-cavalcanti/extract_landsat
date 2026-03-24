@@ -1,0 +1,24 @@
+# Período
+start_year: 2000
+end_year: 2025
+quarters: [1, 2, 3, 4]
+
+# Qualidade / filtros
+cloud_cover_land_max: 80     # filtra cenas muito nubladas (metadado)
+n_obs_min_ndvi: 3            # mínimo de observações válidas por pixel para NDVI
+n_obs_min_temp: 3            # mínimo de observações válidas por pixel para temp
+
+# Export
+export_target: "drive"       # "drive" ou "gcs"
+drive_folder: "gee_exports"
+file_prefix: "sp_landsat_q"
+scale: 30
+max_pixels: 10000000000000
+
+# Temperatura: use ST_QA se quiser cortar por incerteza (0.01 K)
+use_st_qa_filter: false
+st_qa_max: 200               # 200 = 2.00 K (aprox)
+
+# AOI (São Paulo via GAUL)
+aoi_admin0: "Brazil"
+aoi_admin1_variants: ["Sao Paulo", "São Paulo"]
