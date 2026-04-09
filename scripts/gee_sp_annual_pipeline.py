@@ -2,9 +2,6 @@
 """
 Pipeline anual para São Paulo com Landsat Collection 2 Level-2 no Google Earth Engine.
 
-Seleção do estado configurada explicitamente por campo e valor do shapefile.
-Padrão do script: CD_UF == 35.
-
 Inclui três etapas no mesmo arquivo:
 1) export  : gera raster anual contínuo para o estado de SP, com saída em tiles no Drive
              ou como Asset no Earth Engine.
@@ -26,8 +23,6 @@ Exemplos de uso:
 python gee_sp_annual_pipeline.py export \
   --project satexport \
   --shp /caminho/municipios.shp \
-  --uf-field CD_UF \
-  --uf-value 35 \
   --years 2022 \
   --export-folder gee_exports \
   --export-prefix landsat_annual_sp
@@ -36,8 +31,6 @@ python gee_sp_annual_pipeline.py export \
 python gee_sp_annual_pipeline.py export \
   --project satexport \
   --shp /caminho/municipios.shp \
-  --uf-field CD_UF \
-  --uf-value 35 \
   --years 2000 2010 2022 \
   --export-mode asset \
   --asset-root projects/seu-projeto-earthengine/assets/landsat_annual_sp
@@ -51,8 +44,6 @@ python gee_sp_annual_pipeline.py mosaic \
 python gee_sp_annual_pipeline.py clip \
   --mosaic-dir /caminho/mosaicos \
   --shp /caminho/municipios.shp \
-  --uf-field CD_UF \
-  --uf-value 35 \
   --output-dir /caminho/recortes \
   --cd-mun-field CD_MUN
 """
@@ -91,6 +82,28 @@ YEAR_PATTERN = re.compile(r"(\d{4})")
 # ============================================================
 # Helpers gerais
 # ============================================================
+def normalize_text(value) -> str:
+    if value is None:
+        return ""
+    return (
+        str(value)
+        .strip()
+        .upper()
+        .replace("Á", "A")
+        .replace("À", "A")
+        .replace("Ã", "A")
+        .replace("Â", "A")
+        .replace("É", "E")
+        .replace("Ê", "E")
+        .replace("Í", "I")
+        .replace("Ó", "O")
+        .replace("Ô", "O")
+        .replace("Õ", "O")
+        .replace("Ú", "U")
+        .replace("Ç", "C")
+    )
+
+
 def parse_years(values: Iterable[str]) -> list[int]:
     years: list[int] = []
     for value in values:
@@ -177,11 +190,7 @@ def base_collection(
 # ============================================================
 # Geometria de SP a partir do shapefile de municípios
 # ============================================================
-def load_sao_paulo_gdf(
-    shp_path: str | Path,
-    uf_field: str = "CD_UF",
-    uf_value: str = "35",
-) -> gpd.GeoDataFrame:
+def load_sao_paulo_gdf(shp_path: str | Path) -> gpd.GeoDataFrame:
     gdf = gpd.read_file(shp_path)
     if gdf.empty:
         raise ValueError("O shapefile foi lido, mas está vazio.")
@@ -192,32 +201,26 @@ def load_sao_paulo_gdf(
     if invalid_count > 0:
         gdf["geometry"] = gdf.geometry.buffer(0)
 
-    if uf_field not in gdf.columns:
+    if "CD_UF" not in gdf.columns:
         raise ValueError(
-            f"Campo de UF '{uf_field}' não encontrado. "
+            "O shapefile precisa ter a coluna CD_UF para selecionar São Paulo. "
             f"Campos disponíveis: {gdf.columns.tolist()}"
         )
 
-    field_as_str = gdf[uf_field].astype(str).str.strip()
-    uf_value_str = str(uf_value).strip()
-    gdf_sp = gdf[field_as_str == uf_value_str].copy()
-
-    print(f"Filtro de estado aplicado: {uf_field} == {uf_value_str}")
+    gdf["CD_UF_norm"] = gdf["CD_UF"].astype(str).str.strip()
+    gdf_sp = gdf[gdf["CD_UF_norm"] == "35"].copy()
 
     if gdf_sp.empty:
         raise ValueError(
-            f"Nenhuma feição encontrada com {uf_field} == {uf_value_str}."
+            "Nenhuma feição com CD_UF == '35' foi encontrada no shapefile."
         )
 
+    print("Filtro do estado: CD_UF == '35'")
     return gdf_sp
 
 
-def load_sao_paulo_ee_geometry(
-    shp_path: str | Path,
-    uf_field: str = "CD_UF",
-    uf_value: str = "35",
-) -> ee.Geometry:
-    gdf_sp = load_sao_paulo_gdf(shp_path, uf_field=uf_field, uf_value=uf_value)
+def load_sao_paulo_ee_geometry(shp_path: str | Path) -> ee.Geometry:
+    gdf_sp = load_sao_paulo_gdf(shp_path)
     print(f"Feições selecionadas para SP: {len(gdf_sp)}")
     state_gdf = gdf_sp.dissolve()
     return geemap.gdf_to_ee(state_gdf).geometry()
@@ -446,7 +449,7 @@ def run_export(args: argparse.Namespace) -> None:
     years = parse_years(args.years)
     init_ee(args.project)
 
-    target_geom = load_sao_paulo_ee_geometry(args.shp, uf_field=args.uf_field, uf_value=args.uf_value)
+    target_geom = load_sao_paulo_ee_geometry(args.shp)
     search_geom = target_geom
 
     crs_transform, export_region, width, height = build_export_grid(
@@ -504,6 +507,12 @@ def run_export(args: argparse.Namespace) -> None:
         final_state = wait_for_task(task, args.poll_seconds)
         print(f"Export finalizado: {target} | estado: {final_state}")
 
+        if args.export_mode == "drive":
+            print(
+                "Aviso: os arquivos exportados permanecem no Google Drive. "
+                "Este script nao baixa nem apaga arquivos do Drive automaticamente."
+            )
+
     print("\nTodos os anos foram processados.")
 
 
@@ -554,9 +563,15 @@ def mosaic_year(year: str, files: list[Path], output_dir: Path, prefix: str, nod
             }
         )
 
+        band_descriptions = tuple(srcs[0].descriptions) if srcs and srcs[0].descriptions else tuple()
+
         out_path = output_dir / f"{prefix}_{year}_mosaic.tif"
         with rasterio.open(out_path, "w", **meta) as dst:
             dst.write(mosaic)
+            if band_descriptions:
+                for idx, desc in enumerate(band_descriptions, start=1):
+                    if desc:
+                        dst.set_band_description(idx, desc)
 
         print(f"Mosaico salvo em: {out_path}")
         return out_path
@@ -603,7 +618,7 @@ def run_clip(args: argparse.Namespace) -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    gdf_sp = load_sao_paulo_gdf(args.shp, uf_field=args.uf_field, uf_value=args.uf_value)
+    gdf_sp = load_sao_paulo_gdf(args.shp)
     if args.cd_mun_field not in gdf_sp.columns:
         raise ValueError(
             f"Campo {args.cd_mun_field} não encontrado no shapefile. "
@@ -653,10 +668,16 @@ def run_clip(args: argparse.Namespace) -> None:
                     }
                 )
 
+                band_descriptions = tuple(src.descriptions) if src.descriptions else tuple()
+
                 out_name = f"{args.export_prefix}_{year}_CD_MUN_{cd_mun}.tif"
                 out_path = output_dir / out_name
                 with rasterio.open(out_path, "w", **out_meta) as dst:
                     dst.write(out_image)
+                    if band_descriptions:
+                        for idx, desc in enumerate(band_descriptions, start=1):
+                            if desc:
+                                dst.set_band_description(idx, desc)
 
         print(f"Recortes concluídos para {mosaic_path.name}")
 
@@ -675,9 +696,7 @@ def build_parser() -> argparse.ArgumentParser:
     # export
     p_export = subparsers.add_parser("export", help="Exporta raster anual contínuo de SP via Earth Engine.")
     p_export.add_argument("--project", required=True, help="Projeto do Earth Engine / Google Cloud.")
-    p_export.add_argument("--shp", required=True, help="Shapefile de municípios (ou do estado) contendo SP.")
-    p_export.add_argument("--uf-field", default="CD_UF", help="Campo que identifica a UF no shapefile.")
-    p_export.add_argument("--uf-value", default="35", help="Valor do campo de UF para São Paulo.")
+    p_export.add_argument("--shp", required=True, help="Shapefile de municípios com a coluna CD_UF; SP sera filtrado por CD_UF == 35.")
     p_export.add_argument("--years", nargs="+", required=True, help="Anos, ex.: 2000 2010 2022")
     p_export.add_argument("--export-mode", choices=["drive", "asset"], default="drive")
     p_export.add_argument("--asset-root", default="", help="Obrigatório se export-mode=asset.")
@@ -703,9 +722,7 @@ def build_parser() -> argparse.ArgumentParser:
     # clip
     p_clip = subparsers.add_parser("clip", help="Recorta mosaicos anuais por município.")
     p_clip.add_argument("--mosaic-dir", required=True, help="Pasta com os mosaicos anuais.")
-    p_clip.add_argument("--shp", required=True, help="Shapefile de municípios contendo SP.")
-    p_clip.add_argument("--uf-field", default="CD_UF", help="Campo que identifica a UF no shapefile.")
-    p_clip.add_argument("--uf-value", default="35", help="Valor do campo de UF para São Paulo.")
+    p_clip.add_argument("--shp", required=True, help="Shapefile de municípios com a coluna CD_UF; SP sera filtrado por CD_UF == 35.")
     p_clip.add_argument("--output-dir", required=True, help="Pasta de saída dos recortes.")
     p_clip.add_argument("--cd-mun-field", default="CD_MUN", help="Campo com o código municipal.")
     p_clip.add_argument("--export-prefix", default="landsat_annual_sp")
